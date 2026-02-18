@@ -1,0 +1,96 @@
+####################################################################
+# ecf file #
+###################
+## Define input ##
+# You may edit this command if your column name is different from the example
+DEFINE --acolIn SNPID;rsID;A1;A2;AF1;BETA;SE;P;IMPUTED;IMPUTED_SCORE;OBS_CT;HWE;TYPE
+--acolInClasses character;character;character;character;numeric;numeric;numeric;numeric;integer;numeric;integer;numeric;character
+--strMissing NA
+--strSeparator TAB
+--pathOut /file_QC
+EASYIN --fileIn /file_QC/BGI/BGI-lcWGS.EA.women.for_QC.chr1-22.txt --fileInShortName BGI
+EASYIN --fileIn /file_QC/WeGene/WGEA.EA.pooled.for_QC.chr1-22.txt --fileInShortName WGEA
+EASYIN --fileIn /file_QC/WeGene/WGEC.EA.pooled.for_QC.chr1-22.txt --fileInShortName WGEC
+EASYIN --fileIn /file_QC/WeGene/WGEG.EA.pooled.for_QC.chr1-22.txt --fileInShortName WGEG
+EASYIN --fileIn /file_QC/WEGUT/WEGUT.EA.pooled.for_QC.chr1-22.txt --fileInShortName WEGUT
+EASYIN --fileIn /file_QC/CKB/CKB.EA.pooled.for_QC.chr1-22.txt --fileInShortName CKB
+
+
+# Use "SPACE" if the delimiter is different
+# Please plug in with your output address & input file
+###################
+## Start ##
+START EASYQC
+# Change column names
+STRSPLITCOL --colSplit SNPID --strSplit : --numSplitIdx 1 --colOut CHR
+STRSPLITCOL --colSplit SNPID --strSplit : --numSplitIdx 2 --colOut POS
+RENAMECOL --colInRename SNPID --colOutRename cptid
+# Choose INFO or R2 according to the output of imputation
+#RENAMECOL --colInRename INFO/R2 --colOutRename INFO
+# Please plug in the cohort-specific var(y) and sd(y)
+# After phenotype standardization, both var(y) and sd(y) should be 1
+ADDCOL --rcdAddCol (2*AF1*(1-AF1)*(BETA^2))/1 --colOut coefficient_of_determination
+ADDCOL --rcdAddCol (1/sqrt(OBS_CT*2*AF1*(1-AF1)))/SE --colOut SE_ratio
+# Remove SNPs with nonsensical information
+CLEAN --rcdClean is.na(A1) & is.na(A2) --strCleanName numDrop_Missing_Alleles
+CLEAN --rcdClean is.na(P) --strCleanName numDrop_Missing_P
+CLEAN --rcdClean is.na(BETA) --strCleanName numDrop_Missing_BETA
+CLEAN --rcdClean is.na(SE) --strCleanName numDrop_Missing_SE
+CLEAN --rcdClean is.na(AF1) --strCleanName numDrop_Missing_EAF
+CLEAN --rcdClean is.na(OBS_CT) --strCleanName numDrop_Missing_OBS_CT
+CLEAN --rcdClean is.na(cptid) --strCleanName numDrop_Missing_position
+CLEAN --rcdClean P<0|P>1 --strCleanName numDrop_invalid_PVAL
+CLEAN --rcdClean SE<=0|SE==Inf|SE>=10 --strCleanName numDrop_invalid_SE
+CLEAN --rcdClean abs(BETA)>=10 --strCleanName numDrop_invalid_BETA
+CLEAN --rcdClean AF1<0|AF1>1 --strCleanName numDrop_invalid_EAF
+CLEAN --rcdClean (AF1 == 0 | AF1 == 1) --strCleanName numDrop_Monomorph
+CLEAN --rcdClean HWE < 1e-6 --strCleanName numDrop_HWE
+# Remove duplicated SNPs
+CLEANDUPLICATES --colInMarker cptid --strMode removeall
+# Remove extremely rare SNPs
+ADDCOL --rcdAddCol signif(2*pmin(AF1,1-AF1)*OBS_CT,4) --colOut MAC
+CLEAN --rcdClean MAC <= 25 --strCleanName numDrop_MAClt25
+# Remove SNPs with low imputation score
+# Please choose either INFO or R2
+CLEAN --rcdClean (IMPUTED==1 & TYPE=="INFO" & IMPUTED_SCORE<0.4) | (IMPUTED==1 & TYPE=="R2" & IMPUTED_SCORE<0.3) --strCleanName numDrop_lowImpQual
+# Remove SNPs with R^2 > 0.05 (effect size)
+CLEAN --rcdClean coefficient_of_determination >= 0.05  --strCleanName numDrop_huge_effect_size
+# Remove SNPs with se ratio < 0.5 or > 2 #
+CLEAN --rcdClean SE_ratio < 0.5 | SE_ratio > 2 --strCleanName numDrop_invalid_seRatio
+# Perform GC correction with adjusted P-values & SE as output
+# If you do not want to adjust P-value and SE, you could use the original P-value and SE
+GC --colPval P --colSE SE
+
+###################
+## Output filtered results ##
+# Rearrange output column names
+GETCOLS --acolOut cptid;CHR;POS;rsID;A1;A2;AF1;BETA;SE;P;OBS_CT;MAC;P.GC;SE.GC
+WRITE --strPrefix Cleaned. --strMissing NA --strMode gz
+
+###################
+## Draw 4 plots for ensurance ##
+# Plot Z versus P
+PZPLOT	--colBeta BETA
+		--colSe SE
+		--colPval P
+# QQ plot
+QQPLOT	--acolQQPlot P
+		--numPvalOffset 0.05
+		--strMode subplot
+# Summary Stats post-QC
+CALCULATE --rcdCalc max(OBS_CT,na.rm=T) --strCalcName N_max
+RPLOT	--rcdRPlotX N_max
+		--rcdRPlotY Lambda.P.GC
+		--arcdAdd2Plot abline(h=1,col='orange');abline(h=1.1,col='red')
+		--strAxes lim(0,NULL,0,NULL)
+		--strPlotName GC-PLOT
+# SE-N Plot - Trait transformation
+CALCULATE --rcdCalc median(SE,na.rm=T) --strCalcName SE_median
+CALCULATE --rcdCalc median(1/sqrt(2*AF1*(1-AF1)), na.rm=T) --strCalcName c_trait_transf
+RPLOT 	--rcdRPlotX sqrt(N_max)
+		--rcdRPlotY c_trait_transf/SE_median
+		--arcdAdd2Plot abline(0,1,col='orange')
+		--strAxes zeroequal
+		--strPlotName SEN-PLOT
+STOP EASYQC
+####################################################################
